@@ -1,0 +1,220 @@
+# Novu (https://github.com/novuhq/novu) self-hosted for the CloudShift Openship homelab.
+# Based on novuhq/novu docker/community/docker-compose.yml (v3.19.0), adapted for Openship:
+#   - no container_name (avoids clashes with other projects on the host)
+#   - only api/ws/dashboard publish ports, on free homelab ports (3040/3041/3042)
+#   - MongoDB WiredTiger cache capped at 0.5 GB and every service memory-limited
+#   - own Redis (never the Openship Redis), persisted to a volume
+# Public URLs (Caddy on the VPS -> Openship edge):
+#   dashboard https://novu.app.cloudshiftsolutions.in
+#   api       https://novu-api.app.cloudshiftsolutions.in
+#   ws        https://novu-ws.app.cloudshiftsolutions.in
+# Secrets (JWT_SECRET, STORE_ENCRYPTION_KEY, NOVU_SECRET_KEY, MONGO_INITDB_ROOT_PASSWORD, MONGO_URL)
+# are set as literal values on each Openship service, never committed.
+
+services:
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "200mb", "--maxmemory-policy", "noeviction"]
+    volumes:
+      - novu_redis:/data
+    mem_limit: 256m
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  mongodb:
+    image: mongo:8.0.17
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
+    command: ["mongod", "--wiredTigerCacheSizeGB", "0.5"]
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: novu
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_INITDB_ROOT_PASSWORD}
+    volumes:
+      - novu_mongodb:/data/db
+    mem_limit: 1536m
+    healthcheck:
+      test: ["CMD-SHELL", "mongosh --quiet -u \"$$MONGO_INITDB_ROOT_USERNAME\" -p \"$$MONGO_INITDB_ROOT_PASSWORD\" --authenticationDatabase admin --eval \"db.adminCommand('ping').ok\" | grep -q 1"]
+      interval: 20s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  api:
+    image: ghcr.io/novuhq/novu/api:3.19.0
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "3040:3040"
+    environment:
+      NODE_ENV: local
+      LOG_LEVEL: info
+      TZ: UTC
+      MONGO_URL: ${MONGO_URL}
+      MONGO_MIN_POOL_SIZE: "5"
+      MONGO_MAX_POOL_SIZE: "10"
+      MONGO_AUTO_CREATE_INDEXES: "true"
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      REDIS_PASSWORD: ""
+      REDIS_CACHE_SERVICE_HOST: redis
+      REDIS_CACHE_SERVICE_PORT: "6379"
+      STORE_ENCRYPTION_KEY: ${STORE_ENCRYPTION_KEY}
+      SUBSCRIBER_WIDGET_JWT_EXPIRATION_TIME: 15d
+      NEW_RELIC_ENABLED: "false"
+      IS_SELF_HOSTED: "true"
+      HOST: 0.0.0.0
+      PORT: "3040"
+      API_ROOT_URL: https://novu-api.app.cloudshiftsolutions.in
+      FRONT_BASE_URL: https://novu.app.cloudshiftsolutions.in
+      JWT_SECRET: ${JWT_SECRET}
+      NOVU_SECRET_KEY: ${NOVU_SECRET_KEY}
+      DISABLE_USER_REGISTRATION: ${DISABLE_USER_REGISTRATION:-false}
+      IS_API_IDEMPOTENCY_ENABLED: "false"
+      IS_API_RATE_LIMITING_ENABLED: "false"
+      IS_NEW_MESSAGES_API_RESPONSE_ENABLED: "true"
+      IS_V2_ENABLED: "true"
+    mem_limit: 1024m
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://127.0.0.1:3040/v1/health-check || exit 1"]
+      interval: 20s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+  worker:
+    image: ghcr.io/novuhq/novu/worker:3.19.0
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      NODE_ENV: local
+      LOG_LEVEL: info
+      TZ: UTC
+      MONGO_URL: ${MONGO_URL}
+      MONGO_MIN_POOL_SIZE: "5"
+      MONGO_MAX_POOL_SIZE: "10"
+      MONGO_AUTO_CREATE_INDEXES: "true"
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      REDIS_PASSWORD: ""
+      REDIS_CACHE_SERVICE_HOST: redis
+      REDIS_CACHE_SERVICE_PORT: "6379"
+      STORE_ENCRYPTION_KEY: ${STORE_ENCRYPTION_KEY}
+      SUBSCRIBER_WIDGET_JWT_EXPIRATION_TIME: 15d
+      NEW_RELIC_ENABLED: "false"
+      IS_SELF_HOSTED: "true"
+      PORT: "3004"
+      API_ROOT_URL: http://api:3040
+      BROADCAST_QUEUE_CHUNK_SIZE: "100"
+      MULTICAST_QUEUE_CHUNK_SIZE: "100"
+      IS_EMAIL_INLINE_CSS_DISABLED: "false"
+      IS_USE_MERGED_DIGEST_ID_ENABLED: "false"
+    mem_limit: 1024m
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://127.0.0.1:3004/v1/health-check || exit 1"]
+      interval: 20s
+      timeout: 10s
+      retries: 5
+      start_period: 40s
+
+  ws:
+    image: ghcr.io/novuhq/novu/ws:3.19.0
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "3041:3041"
+    environment:
+      NODE_ENV: local
+      LOG_LEVEL: info
+      TZ: UTC
+      MONGO_URL: ${MONGO_URL}
+      MONGO_MIN_POOL_SIZE: "5"
+      MONGO_MAX_POOL_SIZE: "10"
+      MONGO_AUTO_CREATE_INDEXES: "true"
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      REDIS_PASSWORD: ""
+      REDIS_CACHE_SERVICE_HOST: redis
+      REDIS_CACHE_SERVICE_PORT: "6379"
+      STORE_ENCRYPTION_KEY: ${STORE_ENCRYPTION_KEY}
+      SUBSCRIBER_WIDGET_JWT_EXPIRATION_TIME: 15d
+      NEW_RELIC_ENABLED: "false"
+      IS_SELF_HOSTED: "true"
+      HOST: 0.0.0.0
+      PORT: "3041"
+      JWT_SECRET: ${JWT_SECRET}
+    mem_limit: 512m
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://127.0.0.1:3041/v1/health-check || exit 1"]
+      interval: 20s
+      timeout: 10s
+      retries: 5
+      start_period: 40s
+
+  dashboard:
+    image: ghcr.io/novuhq/novu/dashboard:3.19.0
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
+    depends_on:
+      api:
+        condition: service_healthy
+    command: ["http-server", "dist", "-p", "3042", "-d", "false", "--proxy", "http://localhost:3042?"]
+    ports:
+      - "3042:3042"
+    environment:
+      VITE_API_HOSTNAME: https://novu-api.app.cloudshiftsolutions.in
+      VITE_WEBSOCKET_HOSTNAME: https://novu-ws.app.cloudshiftsolutions.in
+    mem_limit: 256m
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3042/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 20s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+
+volumes:
+  novu_mongodb:
+  novu_redis:
