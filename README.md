@@ -25,7 +25,7 @@ Set as literal values on each Openship service (service values override project 
 - `MONGO_INITDB_ROOT_PASSWORD` (mongodb) and `MONGO_URL` (api, worker, ws):
   `mongodb://novu:<password>@mongodb:27017/novu-db?authSource=admin`
 
-`DISABLE_USER_REGISTRATION=true` is set on the api service once the admin account exists.
+`DISABLE_USER_REGISTRATION=true` on the api service: public sign-up is off. Add teammates by inviting them from the dashboard (Settings → Team). To create another account directly, set it to `false`, apply env on the api service, register, then set it back to `true`.
 
 ## Using it from an app
 
